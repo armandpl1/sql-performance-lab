@@ -1,0 +1,151 @@
+# Project steps
+
+A step-by-step record of how this lab was built and how to check each step.
+For the design and results, see README.md. For what is still missing, see
+IMPROVEMENTS.txt. To learn the repo, follow LEARNING_GUIDE.txt.
+
+Status: every step's code is written and tested. Correctness is checked in CI
+on a small dataset. Full-scale timings (10M + 20M rows) still need a local
+run: `make db-up data load lab`.
+
+---
+
+## Setup: environment
+
+**Goal:** a reproducible environment with PostgreSQL and the Python tools.
+
+1. PostgreSQL 17 runs in Docker (`docker-compose.yml`), with settings sized
+   for a laptop with about 8 GB of RAM.
+2. Python 3.11 (`.python-version`), dependencies pinned in `uv.lock`.
+3. Linters: ruff and black, run by pre-commit hooks (`.pre-commit-config.yaml`).
+
+```bash
+make install && make hooks && make db-up
+```
+
+**Check:** `docker compose ps` shows the container as healthy.
+
+---
+
+## Step 1: Performance lab and baseline ✅
+
+**Goal:** tens of millions of realistic rows, and a deliberately slow query to
+improve.
+
+1. `scripts/generate_data.py` writes 10M transactions and 20M user events,
+   using only `random` and `datetime`. Same seed, same files, with any number
+   of workers.
+2. `scripts/load_data.py` loads the CSVs with COPY, adds the baseline indexes
+   (`sql/indexes.sql`) and runs VACUUM ANALYZE.
+3. `sql/queries/01_baseline_rolling_30d.sql` computes rolling 30-day account
+   metrics with four labeled anti-patterns:
+   - correlated subqueries
+   - functions on indexed columns
+   - DISTINCT after per-row work
+   - MAX over a function
+4. `scripts/benchmark.py` times a query, saves its plan, and checksums its rows.
+
+```bash
+make data load
+uv run python scripts/benchmark.py sql/queries/01_baseline_rolling_30d.sql --runs 1
+```
+
+**Check:** a line in `results/benchmarks.csv` and a plan in `results/plans/`.
+
+---
+
+## Step 2: Diagnose bottlenecks with EXPLAIN ANALYZE ✅
+
+**Goal:** read a plan the way the engine executes it, and document the costs.
+
+1. `scripts/analyze_plan.py` runs EXPLAIN (ANALYZE, BUFFERS, SETTINGS,
+   FORMAT JSON) and writes a report to `results/analysis/`:
+   - total cost, CPU vs I/O time, memory, spill to disk
+   - time by node
+   - findings: sequential scans, nodes run thousands of times, spills,
+     functions in filters, bad row estimates
+2. `--set work_mem=4MB` shows what changes when memory is tight.
+
+```bash
+uv run python scripts/analyze_plan.py sql/queries/01_baseline_rolling_30d.sql
+```
+
+**Check:** `results/analysis/01_baseline_rolling_30d.md` lists the findings.
+
+---
+
+## Step 3: Window functions and frame clauses ✅
+
+**Goal:** solve sessionization and running totals without self-joins.
+
+1. `03a_sessionize_events.sql`: gaps and islands. LAG() finds gaps over 30
+   minutes; a running SUM() numbers the sessions.
+2. `03b_running_balance.sql`: running balance (RANGE UNBOUNDED PRECEDING),
+   3-transaction moving average (ROWS 2 PRECEDING), 30-day time-based sum
+   (RANGE INTERVAL '30 days' PRECEDING).
+
+**Check:** both run in `make check` (RUN_ONLY section).
+
+---
+
+## Step 4: Partitioning and clustering ✅
+
+**Goal:** show how physical layout decides how much data a query reads.
+
+1. `sql/storage/04a_partition_by_month.sql`: monthly partitions, rows
+   clustered by account inside each partition.
+2. `sql/storage/04b_sort_by_time_with_brin.sql`: table sorted by time with a
+   tiny BRIN index (zone maps).
+3. `sql/storage/04c_cluster_by_account.sql`: table clustered by account with
+   a composite index.
+4. `04_week_range_*.sql` and `04_account_history_*.sql`: the same query on
+   each layout.
+
+```bash
+make storage && make check
+```
+
+**Check:** each layout returns the same rows as the original table.
+
+---
+
+## Step 5: Refactor subqueries with CTEs and window functions ✅
+
+**Goal:** replace procedural, row-by-row SQL with set-based SQL.
+
+1. `05a_rolling_30d_ctes.sql`: the baseline as CTEs. Each table is read once,
+   and a range join replaces the correlated subqueries.
+2. `05b_rolling_30d_window.sql`: the baseline as one window frame, RANGE
+   INTERVAL '29 days' PRECEDING. No joins at all.
+3. `05c_cte_materialized.sql` vs `05d_cte_inlined.sql`: the same query,
+   showing when PostgreSQL materializes a CTE and when it inlines it.
+
+**Check:** `make check` proves 05a and 05b return exactly the baseline's rows.
+
+---
+
+## Step 6: CI/CD ✅
+
+**Goal:** every change checked automatically, against a real database.
+
+1. `.github/workflows/ci.yml`: lint and unit tests in parallel, then an
+   integration job. That job starts PostgreSQL from `docker-compose.yml`,
+   loads a small dataset, builds every storage layout, and runs the
+   equivalence check and the plan analyzer.
+2. Actions pinned to commit SHAs, read-only token, timeouts, artifacts.
+3. Dependabot opens weekly update PRs.
+4. `main` is protected: pull requests and passing checks required.
+
+```bash
+make ci            # lint + unit tests
+make integration   # the integration job, locally (needs Docker)
+```
+
+**Check:** the CI badge in the README is green.
+
+---
+
+## Next steps
+
+Run the lab at full scale and record the timings in the README: `make lab`.
+Then see IMPROVEMENTS.txt.
