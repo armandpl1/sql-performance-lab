@@ -1,0 +1,41 @@
+# Checks that run before every commit, and again in CI (the lint job).
+#
+# Set up once:   uv run pre-commit install
+# Run by hand:   uv run pre-commit run --all-files
+#
+# Python linters run through `uv run`, so they use exactly the versions pinned
+# in uv.lock: the same tools and versions locally and in CI.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1000"]
+      - id: detect-private-key
+
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff
+        entry: uv run ruff check
+        language: system
+        types: [python]
+
+      - id: black
+        name: black
+        entry: uv run black --check
+        language: system
+        types: [python]
+
+      - id: uv-lock
+        name: uv.lock is up to date
+        entry: uv lock --check
+        language: system
+        files: ^(pyproject\.toml|uv\.lock)$
+        pass_filenames: false

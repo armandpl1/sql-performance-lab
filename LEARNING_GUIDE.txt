@@ -1,0 +1,130 @@
+# How to learn this repo, step by step
+
+The lab follows one idea: measure, change one thing, measure again, and prove
+the answer didn't change. Each stage says what to read, what to run, and a
+question to check you understood. Answers are at the end.
+
+Start the database once: `make install db-up`.
+
+---
+
+## Stage 0: Run it (30 min)
+
+    make data-small load storage check
+
+You now have a small dataset loaded, every storage layout built, and proof
+that all optimized queries agree with the originals. Read the README top to
+bottom once.
+
+---
+
+## Stage 1: The data and the baseline (1 evening)
+
+Read:
+1. scripts/generate_data.py: the docstring first (why the data is skewed,
+   growing, and stored out of order), then skewed_id() and random_timestamp().
+2. sql/schema.sql and sql/indexes.sql: what exists before any tuning.
+3. sql/queries/01_baseline_rolling_30d.sql: the four anti-patterns are
+   labeled in the header comment.
+4. scripts/benchmark.py: how timings and checksums are taken.
+
+Try:
+- uv run python scripts/benchmark.py sql/queries/01_baseline_rolling_30d.sql --runs 3
+  and compare run 1 with runs 2 and 3.
+
+Check yourself:
+  Q1. Why does the first run usually take longer than the next ones?
+  Q2. Why does skewed data (a few very busy accounts) hurt correlated
+      subqueries so much more than evenly spread data?
+
+---
+
+## Stage 2: Reading plans (1 evening)
+
+Read:
+1. scripts/analyze_plan.py: build_tree() and how self time is computed.
+2. results/analysis/01_baseline_rolling_30d.md after running the analyzer.
+
+Try:
+- uv run python scripts/analyze_plan.py sql/queries/01_baseline_rolling_30d.sql
+- The same with --set work_mem=1MB --suffix _low_mem, and compare the
+  Spill to disk lines.
+
+Check yourself:
+  Q3. A node shows loops=50,000 and 0.02 ms per loop. How much time is that?
+  Q4. Why can't the index on transaction_timestamp be used for
+      WHERE DATE(transaction_timestamp) > ...?
+
+---
+
+## Stage 3: Window functions (1 evening)
+
+Read sql/queries/03a_sessionize_events.sql and 03b_running_balance.sql.
+For each window, say out loud: partition, order, frame.
+
+Check yourself:
+  Q5. In 03b, why is the date filter applied after the window functions
+      and not before?
+  Q6. What is the difference between ROWS and RANGE when two rows have the
+      same timestamp?
+
+---
+
+## Stage 4: Storage layout (1 evening)
+
+Read the three files in sql/storage/, then the 04_*.sql queries.
+
+Try, for each layout:
+- uv run python scripts/analyze_plan.py sql/queries/04_week_range_partitioned.sql
+  and compare buffers touched with the _original and _time_sorted_brin
+  versions.
+
+Check yourself:
+  Q7. Why is a BRIN index useless on the original table?
+  Q8. What does "partition pruning" remove from the plan?
+
+---
+
+## Stage 5: Rewrites (1 evening)
+
+Read 05a and 05b side by side with the baseline. Then 05c and 05d.
+
+Try:
+- make check, then compare the three timings in the first group.
+
+Check yourself:
+  Q9. Why must every rewrite match the baseline's checksum?
+  Q10. When does PostgreSQL 12+ materialize a CTE by default?
+
+---
+
+## Stage 6: CI and your own change
+
+Read .github/workflows/ci.yml and AGENTS.md. Then add a query of your own:
+write it in sql/queries/, add it to scripts/check_equivalence.py, run
+make ci && make check, and open a pull request.
+
+---
+
+## Answers
+
+Q1. The first run reads pages from disk into PostgreSQL's cache and the OS
+    cache; later runs find them in memory.
+Q2. The subquery re-reads an account's whole history for every one of its
+    rows, so cost grows with the square of an account's activity.
+Q3. 50,000 x 0.02 ms = 1,000 ms = 1 second. Per-loop times hide totals.
+Q4. The index is sorted by the raw timestamp, not by DATE(timestamp), so
+    the planner can't search it for the function's value.
+Q5. Running totals need every earlier row. Filtering first would drop the
+    history the totals are built from.
+Q6. ROWS counts physical rows, so tied rows get different running totals in
+    an arbitrary order. RANGE treats ties as peers and gives them the same
+    value.
+Q7. BRIN stores min/max per block range. In an unsorted table every block
+    range spans almost all dates, so nothing can be skipped.
+Q8. Every partition whose date range can't match the filter: they aren't
+    scanned at all.
+Q9. A faster query that returns a different answer is a bug, not an
+    optimization. The checksum proves the rows are identical.
+Q10. When the CTE is referenced more than once (or marked MATERIALIZED);
+     a CTE used once is inlined.

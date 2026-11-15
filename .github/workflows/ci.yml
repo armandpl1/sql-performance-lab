@@ -1,0 +1,153 @@
+# CI for the SQL performance lab.
+#
+#   lint ──┐
+#          ├─> integration (PostgreSQL: load, build layouts, prove equivalence)
+#   test ──┘
+#
+# Runs on every pull request and every push to main.
+#
+# The integration job starts PostgreSQL from the repo's own docker-compose.yml
+# (same version and settings as local runs), loads a small deterministic
+# dataset, builds every Step 4 storage layout, and proves that each
+# optimized query returns exactly the same rows as its original. Full-scale
+# timings (10M + 20M rows) are run locally; CI checks correctness.
+#
+# Security: actions are pinned to full commit SHAs (version in the comment;
+# Dependabot keeps both current), and the token is read-only.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.13.7"
+  UV_LOCKED: "1"
+  FORCE_COLOR: "1"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Check uv.lock matches pyproject.toml
+        run: uv lock --check
+
+      - name: Run pre-commit hooks (ruff, black, file hygiene)
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run pytest (SQL parsing, generator, plan analyzer)
+        run: uv run pytest --junitxml=reports/pytest.xml
+
+      - name: Upload test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pytest-report
+          path: reports/pytest.xml
+          retention-days: 14
+
+  integration:
+    name: PostgreSQL integration
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Start PostgreSQL (docker-compose.yml, waits for healthcheck)
+        run: docker compose up -d --wait
+
+      - name: Generate a small deterministic dataset
+        run: make data-small
+
+      - name: Load into PostgreSQL and build baseline indexes
+        run: uv run python scripts/load_data.py
+
+      - name: Build Step 4 storage layouts
+        run: |
+          for f in sql/storage/*.sql; do uv run python scripts/run_sql.py "$f"; done
+
+      - name: Prove optimized queries return identical results
+        run: uv run python scripts/check_equivalence.py
+
+      - name: Diagnose the baseline plan (Step 2 analyzer)
+        run: uv run python scripts/analyze_plan.py sql/queries/01_baseline_rolling_30d.sql
+
+      - name: Upload plans and analysis
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plan-analysis
+          path: |
+            results/plans/
+            results/analysis/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: PostgreSQL logs on failure
+        if: ${{ failure() }}
+        run: docker compose logs postgres
+
+      - name: Stop PostgreSQL
+        if: ${{ always() }}
+        run: docker compose down -v

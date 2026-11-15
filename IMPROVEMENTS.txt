@@ -1,0 +1,63 @@
+# Improvements: gaps and recommended solutions
+
+| #   | Gap                                     | Impact | Effort | Priority |
+| --- | --------------------------------------- | ------ | ------ | -------- |
+| 1   | No full-scale results recorded yet      | High   | Small  | 1        |
+| 2   | No workload-designed indexes step       | High   | Small  | 2        |
+| 3   | Timings are single-machine, single-run  | Medium | Small  | 3        |
+| 4   | No pg_stat_statements workload view     | Medium | Small  | 4        |
+| 5   | No performance regression check in CI   | Medium | Medium | 5        |
+| 6   | PostgreSQL only; no columnar comparison | Low    | Medium | 6        |
+
+---
+
+## 1. No full-scale results recorded yet
+
+**Today:** CI proves the queries are correct on a small dataset, but the
+README's results table still says "to be measured".
+
+**Solution:** run `make db-up data load lab` once, then copy the medians from
+results/benchmarks.csv and the key findings from results/analysis/ into the
+README, with before/after numbers for each step. Commit results/plans/ and
+results/analysis/ so the claims are backed by the plans.
+
+## 2. No workload-designed indexes step
+
+**Today:** only the baseline's single-column indexes exist. The rewrites get
+faster because of better SQL alone.
+
+**Solution:** add a step with indexes designed for the queries, and measure
+each one separately:
+- a composite index on (account_id, transaction_timestamp) INCLUDE (amount, status)
+- a partial index on completed transactions
+- a covering index for the events count
+
+Show index-only scans in the plans, and the write and size cost of each index.
+
+## 3. Timings are single-machine, single-run
+
+**Solution:** report the median of at least 5 warm runs, plus one cold run
+after restarting PostgreSQL. Record the machine and settings with every
+result (benchmark.py already saves the PostgreSQL version).
+
+## 4. No pg_stat_statements workload view
+
+pg_stat_statements is already loaded (docker-compose.yml).
+
+**Solution:** add a script that resets it, runs the lab, and reports total
+time, calls, mean time and shared blocks per query. This is how slow queries
+are found in production.
+
+## 5. No performance regression check in CI
+
+**Solution:** in the integration job, run each optimized query and the
+baseline on the small dataset, and fail if an optimized query is not at least
+N times faster than its baseline. Use a ratio, not absolute times, since CI
+machines vary.
+
+## 6. PostgreSQL only
+
+**Solution:** load the same data into DuckDB and run the same queries. This
+compares a row store with a column store: the correlated-subquery baseline
+behaves very differently, because DuckDB decorrelates subqueries
+automatically.
