@@ -11,14 +11,17 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    # ruff, mypy, pytest and pre-commit at the versions pinned by the toolkit
+    "data-ml-toolkit[dev]",
     "black>=26.10.1",
-    "pre-commit>=4.7.0",
-    "pytest>=8.0",
-    "ruff>=0.17.4",
 ]
 
 [tool.uv]
 package = false
+
+# Shared dev tool pins: https://github.com/armandpl1/data-ml-toolkit
+[tool.uv.sources]
+data-ml-toolkit = { git = "https://github.com/armandpl1/data-ml-toolkit", tag = "v0.1.0" }
 
 [tool.black]
 line-length = 88
